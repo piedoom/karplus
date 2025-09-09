@@ -2,6 +2,7 @@
 #![cfg_attr(bevy_lint, feature(register_tool), register_tool(bevy))]
 
 pub(crate) mod audio;
+mod ui;
 
 use std::{ops::RangeInclusive, time::Duration};
 
@@ -27,6 +28,7 @@ use firewheel::Volume;
 use crate::audio::{AdsrEnvelopeNode, AppBus, CombNode, MathNode, Operation, PinkNoiseGenNode};
 
 const GRAVITY: f32 = -30.0;
+const RECT_HEIGHT: f32 = 2.5;
 
 fn main() -> AppExit {
     App::new().add_plugins(AppPlugin).run()
@@ -58,6 +60,7 @@ impl Plugin for AppPlugin {
             MeshPickingPlugin::default(),
             avian2d::PhysicsPlugins::default(),
             SeedlingPlugin::default(),
+            ui::UiPlugin,
         ))
         .init_resource::<FirstPoint>()
         .init_resource::<CurrentPoint>()
@@ -84,7 +87,7 @@ impl Plugin for AppPlugin {
 }
 
 fn spawn_scene(mut cmd: Commands, mut meshes: ResMut<Assets<Mesh>>) {
-    const DRIPPER_OFFSET: f32 = 36.0;
+    const DRIPPER_OFFSET: f32 = 48.0;
     // Set up audio channels
     cmd.spawn((VolumeNode::default(), AppBus))
         .chain_node(FreeverbNode {
@@ -139,7 +142,7 @@ struct FirstPoint(Option<Vec2>);
 struct CurrentPoint(Option<Vec2>);
 
 fn on_click(
-    trigger: Trigger<Pointer<Click>>,
+    trigger: Trigger<Pointer<Pressed>>,
     mut cmd: Commands,
     mut first_point_res: ResMut<FirstPoint>,
     current_point: Res<CurrentPoint>,
@@ -179,7 +182,7 @@ fn on_click(
                         ),
                         Transform::from_xyz(mid.x, mid.y, 0.0)
                             .with_rotation(Quat::from_rotation_z(angle))
-                            .with_scale(Vec3::new(length, 1.0, 1.0)),
+                            .with_scale(Vec3::new(length, RECT_HEIGHT, 1.0)),
                         Collider::rectangle(1.0, 1.0),
                         RigidBody::Static,
                         Restitution::PERFECTLY_ELASTIC,
@@ -257,7 +260,7 @@ fn on_click(
     }
 }
 
-fn on_remove(trigger: Trigger<Pointer<Click>>, mut cmd: Commands) {
+fn on_remove(trigger: Trigger<Pointer<Pressed>>, mut cmd: Commands) {
     if trigger.button == PointerButton::Secondary {
         cmd.entity(trigger.target()).despawn();
     }
@@ -291,7 +294,6 @@ fn on_hover(trigger: Trigger<Pointer<Move>>, mut point: ResMut<CurrentPoint>) {
 }
 
 fn draw_rect_preview(point_a: Res<FirstPoint>, point_b: Res<CurrentPoint>, mut gizmos: Gizmos) {
-    const HEIGHT: f32 = 1.0;
     match (point_a.0, point_b.0) {
         (Some(a), Some(b)) => {
             let direction = b - a;
@@ -304,7 +306,7 @@ fn draw_rect_preview(point_a: Res<FirstPoint>, point_b: Res<CurrentPoint>, mut g
                     rotation: angle.into(),
                     translation: midpoint.into(),
                 },
-                Vec2::new(length, HEIGHT),
+                Vec2::new(length, RECT_HEIGHT),
                 MAGENTA,
             );
         }
