@@ -22,6 +22,7 @@ use firewheel::core::{
     param::smoother::{SmoothedParam, SmootherConfig},
 };
 pub(crate) use math::{MathNode, Operation};
+pub(crate) use modal::{ModalGenConfig, ModalGenNode};
 pub(crate) use pink_noise::PinkNoiseGenNode;
 
 mod pink_noise {
@@ -632,6 +633,148 @@ mod math {
                             .fold(1.0, |acc, buffer| acc * buffer[i]);
                     },
             };
+
+            ProcessStatus::outputs_not_silent()
+        }
+    }
+}
+
+mod modal {
+
+    use rand::Rng;
+
+    use super::*;
+
+    #[derive(Component, Diff, Patch, Debug, Clone, PartialEq)]
+    pub(crate) struct ModalGenNode<const CHANNELS: usize> {
+        pub(crate) enabled: bool,
+        pub(crate) randomness: f32,
+        pub(crate) trigger: bool,
+    }
+
+    impl<const CHANNELS: usize> Default for ModalGenNode<CHANNELS> {
+        fn default() -> Self {
+            Self {
+                enabled: true,
+                randomness: 10.0,
+                trigger: false,
+            }
+        }
+    }
+
+    #[derive(Component, PartialEq, Clone)]
+    pub(crate) struct ModalGenConfig {
+        pub(crate) modes: Vec<(f32, f32)>,
+        pub(crate) fundamental: f32,
+    }
+
+    impl Default for ModalGenConfig {
+        fn default() -> Self {
+            Self {
+                modes: vec![(1.0, 1.0)],
+                fundamental: 440.0,
+            }
+        }
+    }
+
+    struct Oscillator {
+        phasor: f32,
+        phasor_inc: f32,
+        gain: f32,
+        detune: f32,
+        amp_random: f32,
+    }
+
+    impl<const CHANNELS: usize> AudioNode for ModalGenNode<CHANNELS> {
+        type Configuration = ModalGenConfig;
+
+        fn info(&self, _config: &Self::Configuration) -> AudioNodeInfo {
+            AudioNodeInfo::new()
+                .debug_name("modal_node")
+                .channel_config(ChannelConfig {
+                    num_inputs: ChannelCount::ZERO,
+                    num_outputs: ChannelCount::new(CHANNELS as u32).unwrap(),
+                })
+        }
+
+        fn construct_processor(
+            &self,
+            config: &Self::Configuration,
+            cx: ConstructProcessorContext,
+        ) -> impl AudioNodeProcessor {
+            Processor::<CHANNELS> {
+                enabled: true,
+                randomness: self.randomness,
+                oscillators: config
+                    .modes
+                    .iter()
+                    .map(|(ratio, amplitude)| {
+                        let f = ratio * config.fundamental;
+                        Oscillator {
+                            phasor: 0.0,
+                            phasor_inc: f.clamp(20.0, 20_000.0)
+                                * cx.stream_info.sample_rate_recip as f32,
+                            gain: *amplitude,
+                            detune: 0.0,
+                            amp_random: 0.0,
+                        }
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    struct Processor<const CHANNELS: usize> {
+        pub(crate) enabled: bool,
+        pub(crate) randomness: f32,
+        pub(crate) oscillators: Vec<Oscillator>,
+    }
+
+    impl<const CHANNELS: usize> AudioNodeProcessor for Processor<CHANNELS> {
+        fn process(
+            &mut self,
+            info: &ProcInfo,
+            buffers: ProcBuffers,
+            events: &mut ProcEvents,
+            _extra: &mut ProcExtra,
+        ) -> ProcessStatus {
+            for patch in events.drain_patches::<ModalGenNode<CHANNELS>>() {
+                match patch {
+                    ModalGenNodePatch::Enabled(e) => self.enabled = e,
+                    ModalGenNodePatch::Randomness(r) => self.randomness = r,
+                    ModalGenNodePatch::Trigger(t) => {
+                        if t {
+                            for osc in self.oscillators.iter_mut() {
+                                // randomness in hertz
+                                osc.detune = rand::rng().random::<f32>()
+                                    * self.randomness
+                                    * info.sample_rate_recip as f32;
+                                osc.amp_random = 1.0
+                                    - ((rand::random::<f32>() * self.randomness) / self.randomness)
+                                        * 0.1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !self.enabled {
+                return ProcessStatus::Bypass;
+            }
+
+            for channel in buffers.outputs.iter_mut() {
+                for s in channel.iter_mut() {
+                    // Generate a sine wave for each mode
+                    *s = self.oscillators.iter_mut().fold(0.0, |acc, osc| {
+                        let r = acc
+                            + (osc.phasor * core::f32::consts::TAU).sin()
+                                * osc.gain
+                                * osc.amp_random;
+                        osc.phasor = (osc.phasor + (osc.phasor_inc + osc.detune)).fract();
+                        r
+                    });
+                }
+            }
 
             ProcessStatus::outputs_not_silent()
         }

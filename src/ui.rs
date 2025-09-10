@@ -1,8 +1,10 @@
-use bevy::{color::palettes::css::RED, prelude::*};
+use std::{ops::RangeInclusive, time::Duration};
+
+use bevy::prelude::*;
 use bevy_seedling::prelude::{MainBus, VolumeNode};
 use firewheel::Volume;
 
-use crate::audio::AdsrEnvelopeNode;
+use crate::{Dripper, InsertMode, audio::AdsrEnvelopeNode};
 
 pub(crate) struct UiPlugin;
 
@@ -19,8 +21,20 @@ const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
 const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
 const PRESSED_BUTTON: Color = Color::srgb(0.35, 0.35, 0.35);
 const COLUMN_GAP: Val = Val::Px(16.0);
+const TEMPO_DELTA: Duration = Duration::from_millis(200);
+const RATE_BOUNDS_MILLIS: RangeInclusive<i32> = 400..=5000;
 
 fn spawn_buttons(mut cmd: Commands) {
+    let text = |s: &str| {
+        (
+            Text::new(s),
+            TextFont {
+                font_size: 18.,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        )
+    };
     cmd.spawn(Node {
         position_type: PositionType::Absolute,
         bottom: Val::Px(WINDOW_MARGIN.y),
@@ -43,34 +57,84 @@ fn spawn_buttons(mut cmd: Commands) {
 
         cmd.spawn((button_bundle(), Muted::default()))
             .with_children(|cmd| {
-                cmd.spawn((
-                    Text::new("Mute"),
-                    TextFont {
-                        font_size: 18.,
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
-                ));
+                cmd.spawn(text("Mute"));
             })
             .observe(on_mute_toggle);
 
         cmd.spawn(button_bundle())
             .with_children(|cmd| {
-                cmd.spawn((
-                    Text::new("Clear"),
-                    TextFont {
-                        font_size: 18.,
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
-                ));
+                cmd.spawn(text("Clear"));
             })
             .observe(on_clear);
+
+        cmd.spawn(Node {
+            flex_direction: FlexDirection::Row,
+            ..default()
+        })
+        .with_children(|cmd| {
+            cmd.spawn(button_bundle())
+                .with_children(|cmd| {
+                    cmd.spawn(text("-"));
+                })
+                .observe(on_change_tempo_millis(TEMPO_DELTA.as_millis() as i32));
+
+            cmd.spawn(button_bundle())
+                .with_children(|cmd| {
+                    cmd.spawn(text("+"));
+                })
+                .observe(on_change_tempo_millis(-(TEMPO_DELTA.as_millis() as i32)));
+        });
+
+        cmd.spawn(Node {
+            flex_direction: FlexDirection::Row,
+            ..default()
+        })
+        .with_children(|cmd| {
+            cmd.spawn(button_bundle())
+                .with_children(|cmd| {
+                    cmd.spawn(text("k"));
+                })
+                .observe(on_change_mode(InsertMode::Karplus));
+
+            cmd.spawn(button_bundle())
+                .with_children(|cmd| {
+                    cmd.spawn(text("m"));
+                })
+                .observe(on_change_mode(InsertMode::Modal));
+        });
     });
 }
 
 #[derive(Component, Deref, DerefMut, Default)]
 struct Muted(pub(crate) bool);
+
+pub fn on_change_mode(
+    mode: InsertMode,
+) -> impl IntoSystem<Trigger<'static, Pointer<Click>>, (), ()> {
+    IntoSystem::into_system(
+        move |_trigger: Trigger<Pointer<Click>>, mut existing_mode: ResMut<InsertMode>| {
+            *existing_mode = mode;
+        },
+    )
+}
+
+pub fn on_change_tempo_millis(
+    delta: i32,
+) -> impl IntoSystem<Trigger<'static, Pointer<Click>>, (), ()> {
+    IntoSystem::into_system(
+        move |_trigger: Trigger<Pointer<Click>>, mut drippers: Query<&mut Dripper>| {
+            for mut dripper in drippers.iter_mut() {
+                let millis = dripper.interval.as_millis() as i32;
+                let new_interval = millis.checked_add(delta).unwrap_or_default().clamp(
+                    RATE_BOUNDS_MILLIS.min().unwrap(),
+                    RATE_BOUNDS_MILLIS.max().unwrap(),
+                );
+
+                dripper.interval = Duration::from_millis(new_interval as u64);
+            }
+        },
+    )
+}
 
 fn on_clear(
     _trigger: Trigger<Pointer<Click>>,
@@ -108,11 +172,11 @@ fn on_mute_toggle(
 
 fn button_system(
     mut interaction_query: Query<
-        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (&Interaction, &mut BackgroundColor),
         (Changed<Interaction>, With<Button>),
     >,
 ) {
-    for (interaction, mut color, mut border_color) in &mut interaction_query {
+    for (interaction, mut color) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
                 *color = PRESSED_BUTTON.into();

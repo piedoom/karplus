@@ -25,7 +25,10 @@ use bevy_seedling::{
 };
 use firewheel::Volume;
 
-use crate::audio::{AdsrEnvelopeNode, AppBus, CombNode, MathNode, Operation, PinkNoiseGenNode};
+use crate::audio::{
+    AdsrEnvelopeNode, AppBus, CombNode, MathNode, ModalGenConfig, ModalGenNode, Operation,
+    PinkNoiseGenNode,
+};
 
 const GRAVITY: f32 = -30.0;
 const RECT_HEIGHT: f32 = 2.5;
@@ -64,12 +67,14 @@ impl Plugin for AppPlugin {
         ))
         .init_resource::<FirstPoint>()
         .init_resource::<CurrentPoint>()
+        .init_resource::<InsertMode>()
         .insert_resource(ClearColor(Color::srgb_u8(17, 22, 34)))
         .insert_resource(Gravity(Vec2::Y * GRAVITY))
         .register_node::<audio::AdsrEnvelopeNode>()
         .register_node::<audio::CombNode<1>>()
         .register_node::<audio::MathNode<2>>()
-        .register_node::<audio::PinkNoiseGenNode>();
+        .register_node::<audio::PinkNoiseGenNode>()
+        .register_node::<audio::ModalGenNode<1>>();
 
         // Spawn the main camera.
         app.add_systems(Startup, spawn_scene).add_systems(
@@ -141,6 +146,13 @@ struct FirstPoint(Option<Vec2>);
 #[derive(Resource, Default, Deref, DerefMut)]
 struct CurrentPoint(Option<Vec2>);
 
+#[derive(Resource, Default, Clone, Copy)]
+enum InsertMode {
+    #[default]
+    Karplus,
+    Modal,
+}
+
 fn on_click(
     trigger: Trigger<Pointer<Pressed>>,
     mut cmd: Commands,
@@ -150,6 +162,7 @@ fn on_click(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     sample_rate: Res<SampleRate>,
+    mode: Res<InsertMode>,
 ) {
     const COLOR_LENGTH_BOUNDS: RangeInclusive<f32> = 0.0..=40.0;
     const AUDIO_SCALE: f32 = 2000.0;
@@ -173,6 +186,26 @@ fn on_click(
                     let length = diff.length();
                     let angle = diff.y.atan2(diff.x);
                     let mid = (first_point + current_point) * 0.5;
+                    let freq = ((1.0 / length) * AUDIO_SCALE).max(1.0);
+
+                    let adsr = match mode.as_ref() {
+                        InsertMode::Karplus => AdsrEnvelopeNode {
+                            attack: 0.01,
+                            decay: 0.25,
+                            sustain: Volume::Linear(0.6),
+                            release: 0.45,
+                            gate: false,
+                            velocity: 0.0,
+                        },
+                        InsertMode::Modal => AdsrEnvelopeNode {
+                            attack: 0.04,
+                            decay: 0.1,
+                            sustain: Volume::Linear(0.0),
+                            release: 0.1,
+                            gate: false,
+                            velocity: 0.0,
+                        },
+                    };
 
                     cmd.spawn((
                         Ball,
@@ -187,62 +220,84 @@ fn on_click(
                         RigidBody::Static,
                         Restitution::PERFECTLY_ELASTIC,
                         CollisionEventsEnabled,
-                        AdsrEnvelopeNode {
-                            attack: 0.004,
-                            decay: 0.25,
-                            sustain: Volume::Linear(0.0),
-                            release: 0.15,
-                            gate: false,
-                            velocity: 0.0,
-                        },
+                        adsr,
                     ))
                     .with_children(|cmd| {
                         // Calculate pitch based on length.
                         // Generator and effects graph
                         let adsr = cmd.target_entity();
-                        let noise = cmd.spawn(PinkNoiseGenNode::default()).id();
+
                         let multiplier = cmd
                             .spawn(MathNode::<2> {
                                 operation: Operation::Multiply,
                             })
                             .id();
 
-                        let freq = (1.0 / length) * AUDIO_SCALE;
-                        let period = sample_rate.get().get() as f32 / freq;
+                        match mode.as_ref() {
+                            InsertMode::Modal => {
+                                let modal = cmd
+                                    .spawn((
+                                        ModalGenNode::<1>::default(),
+                                        ModalGenConfig {
+                                            modes: vec![
+                                                (1.0, 0.20),
+                                                (3.0, 0.10),
+                                                (3.3, 0.02),
+                                                (6.16, 0.10),
+                                                (10.29, 0.05),
+                                                (14.01, 0.03),
+                                                (19.66, 0.01),
+                                                (20.02, 0.02),
+                                                (22.42, 0.01),
+                                            ],
+                                            fundamental: freq,
+                                        },
+                                    ))
+                                    .id();
 
-                        let comb = cmd
-                            .spawn((CombNode::<1> {
-                                delay: period as u16,
-                                feedback: Volume::Linear(0.99),
-                                cutoff: 0.69,
-                                ..default()
-                            },))
-                            .id();
+                                cmd.commands()
+                                    .entity(modal)
+                                    .connect_with(multiplier, &[(0, 1)]);
 
-                        let lpf = cmd
-                            .spawn(LowPassNode {
-                                frequency: 1_000f32,
-                            })
-                            .id();
+                                cmd.commands()
+                                    .entity(multiplier)
+                                    .connect_with(AppBus, &[(0, 0), (0, 1)]);
+                            }
+                            InsertMode::Karplus => {
+                                let noise = cmd.spawn(PinkNoiseGenNode::default()).id();
+                                let period = sample_rate.get().get() as f32 / freq;
+                                let comb = cmd
+                                    .spawn((CombNode::<1> {
+                                        delay: period as u16,
+                                        feedback: Volume::Linear(0.99),
+                                        cutoff: 0.69,
+                                        ..default()
+                                    },))
+                                    .id();
+                                let lpf = cmd
+                                    .spawn(LowPassNode {
+                                        frequency: 1_000f32,
+                                    })
+                                    .id();
+                                cmd.commands()
+                                    .entity(noise)
+                                    .connect_with(multiplier, &[(0, 1)]);
 
-                        // Attach nodes
+                                cmd.commands()
+                                    .entity(multiplier)
+                                    .connect_with(lpf, &[(0, 0)]);
+
+                                cmd.commands().entity(lpf).connect_with(comb, &[(0, 0)]);
+
+                                cmd.commands()
+                                    .entity(comb)
+                                    .connect_with(AppBus, &[(0, 0), (0, 1)]);
+                            }
+                        }
+
                         cmd.commands()
                             .entity(adsr)
                             .connect_with(multiplier, &[(0, 0)]);
-
-                        cmd.commands()
-                            .entity(noise)
-                            .connect_with(multiplier, &[(0, 1)]);
-
-                        cmd.commands()
-                            .entity(multiplier)
-                            .connect_with(lpf, &[(0, 0)]);
-
-                        cmd.commands().entity(lpf).connect_with(comb, &[(0, 0)]);
-
-                        cmd.commands()
-                            .entity(comb)
-                            .connect_with(AppBus, &[(0, 0), (0, 1)]);
                     })
                     .observe(on_hit)
                     .observe(on_hit_end)
@@ -268,11 +323,17 @@ fn on_remove(trigger: Trigger<Pointer<Pressed>>, mut cmd: Commands) {
 
 fn on_hit(
     trigger: Trigger<OnCollisionStart>,
-    mut adsrs: Query<&mut AdsrEnvelopeNode>,
+    mut cmd: Commands,
+    mut adsrs: Query<(
+        &mut AdsrEnvelopeNode,
+        &MeshMaterial3d<StandardMaterial>,
+        &Children,
+    )>,
+    mut modals: Query<&mut ModalGenNode<1>>,
     velocities: Query<&LinearVelocity>,
 ) {
     const VELOCITY_BOUNDS: RangeInclusive<f32> = 0.0..=100.0;
-    for mut adsr in adsrs.get_mut(trigger.target()).into_iter() {
+    if let Ok((mut adsr, rect_material, children)) = adsrs.get_mut(trigger.target()) {
         let velocity = velocities.get(trigger.collider).unwrap().length();
         let (start, end) = VELOCITY_BOUNDS.into_inner();
         let impact_strength =
@@ -280,12 +341,31 @@ fn on_hit(
 
         adsr.gate = true;
         adsr.velocity = impact_strength;
+
+        for child in children {
+            if let Ok(mut modal) = modals.get_mut(*child) {
+                modal.trigger = true;
+            }
+        }
+
+        // Set the material of the ball to the just hit rect
+        cmd.entity(trigger.collider).insert(rect_material.clone());
     }
 }
 
-fn on_hit_end(trigger: Trigger<OnCollisionEnd>, mut adsrs: Query<&mut AdsrEnvelopeNode>) {
-    for mut adsr in adsrs.get_mut(trigger.target()).into_iter() {
+fn on_hit_end(
+    trigger: Trigger<OnCollisionEnd>,
+    mut adsrs: Query<(&mut AdsrEnvelopeNode, &Children)>,
+    mut modals: Query<&mut ModalGenNode<1>>,
+) {
+    for (mut adsr, children) in adsrs.get_mut(trigger.target()).into_iter() {
         adsr.gate = false;
+
+        for child in children {
+            if let Ok(mut modal) = modals.get_mut(*child) {
+                modal.trigger = false;
+            }
+        }
     }
 }
 
@@ -358,7 +438,8 @@ fn drip(
     mut material: Local<Option<Handle<StandardMaterial>>>,
     time: Res<Time>,
 ) {
-    const RADIUS: f32 = 0.5;
+    const RADIUS: f32 = 1.0;
+    const LIGHT_Z_OFFSET: f32 = 3.0;
     for (transform, mut timer) in drippers.iter_mut() {
         timer.tick(time.delta());
         if timer.just_finished() {
@@ -379,7 +460,7 @@ fn drip(
             .with_children(|cmd| {
                 cmd.spawn((
                     PointLight { ..default() },
-                    Transform::from_translation(Vec3::Z),
+                    Transform::from_translation(Vec3::Z * LIGHT_Z_OFFSET),
                 ));
             });
         }
