@@ -21,7 +21,7 @@ bevy_seedling = { version = "0.5.2", default-features = false, features = [
     "web_audio",
 ] }
 firewheel = { version = "0.7.2", features = ["bevy"] }
-rand = { version = "0.8", features = [] }
+rand = { version = "0.8" }
 getrandom = { version = "0.2", features = ["js"] }
 
 [dependencies.bevy]

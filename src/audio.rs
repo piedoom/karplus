@@ -746,7 +746,7 @@ mod modal {
                         if t {
                             for osc in self.oscillators.iter_mut() {
                                 // randomness in hertz
-                                osc.detune = rand::rng().random::<f32>()
+                                osc.detune = rand::random::<f32>()
                                     * self.randomness
                                     * info.sample_rate_recip as f32;
                                 osc.amp_random = 1.0
